@@ -151,3 +151,16 @@ See [docs/order-api.md](docs/order-api.md) for request/response details and idem
 4. Admin interface: transaction search, status, and event timeline.
 5. Reliability: webhook inbox, transactional outbox, retries, and reconciliation.
 6. Performance: k6, profiling, metrics, tracing, and scaling experiments.
+
+## Sandbox payment preview
+
+Set MIDTRANS_SERVER_KEY in your local .env to the Sandbox Server Key from your Midtrans account, then run docker compose up --build -d. Open http://localhost:8080/checkout. The server uses the Sandbox endpoints only. The checkout creates an order, reserves one payment per order and opens the hosted checkout. Use test data and simulated funds only.
+
+Endpoints:
+- POST /api/v1/orders/{orderNumber}/payments
+- GET /api/v1/orders/{orderNumber}/payments
+- POST /api/v1/webhooks/midtrans
+
+Set the Midtrans Sandbox payment notification URL to an HTTPS endpoint forwarding only the webhook path to the local API. Do not expose the entire unauthenticated lab API. The webhook verifies the signature and fetches authoritative transaction status before updating the database. Browser redirects never mark an order paid.
+
+If payment creation has an uncertain outcome, the order is deliberately blocked from additional payment creation to avoid duplicate charges. Automatic recovery, refund handling, authentication, rate limiting, outbox delivery and full integration testing are not implemented yet. This is a local development preview, not a production payment gateway.
