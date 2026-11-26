@@ -4,18 +4,34 @@ services:
     container_name: simple-payment-gateway-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: payment_lab
-      POSTGRES_USER: payment
-      POSTGRES_PASSWORD: payment_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-payment_lab}
+      POSTGRES_USER: ${POSTGRES_USER:-payment}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payment_dev_password}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U payment -d payment_lab"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payment} -d ${POSTGRES_DB:-payment_lab}"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simple-payment-gateway-api
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-payment}:${POSTGRES_PASSWORD:-payment_dev_password}@postgres:5432/${POSTGRES_DB:-payment_lab}?sslmode=disable
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
