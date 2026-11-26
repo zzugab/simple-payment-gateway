@@ -1,4 +1,4 @@
--- +migrate Down
+-- Roll back the initial payment gateway schema.
 DROP TABLE IF EXISTS outbox_events;
 DROP TABLE IF EXISTS idempotency_keys;
 DROP TABLE IF EXISTS webhook_events;
