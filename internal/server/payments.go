@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -156,6 +157,9 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 		}
 		writeJSON(w, 200, p)
 	})
+	r.Post("/orders/{orderNumber}/payments/refresh", func(w http.ResponseWriter, r *http.Request) {
+		s.refreshPayment(w, r, pool)
+	})
 	r.Post("/webhooks/midtrans", func(w http.ResponseWriter, r *http.Request) {
 		s.webhook(w, r, pool)
 	})
@@ -186,8 +190,11 @@ func rupiah(v string) (int64, error) {
 
 func nextPayment(old string, n midtransNotice) (string, string) {
 	if n.Status == "settlement" || (n.Status == "capture" && n.Fraud == "accept") {
-		if old == "refund" || old == "partial_refund" || old == "chargeback" {
+		if old != "pending" && old != "authorize" && old != "capture" && old != "settlement" {
 			return old, ""
+		}
+		if old == "settlement" {
+			return old, "paid"
 		}
 		return n.Status, "paid"
 	}
@@ -198,7 +205,11 @@ func nextPayment(old string, n midtransNotice) (string, string) {
 		return old, ""
 	}
 	switch n.Status {
-	case "deny", "cancel", "expire", "failure":
+	case "cancel":
+		return n.Status, "cancelled"
+	case "expire":
+		return n.Status, "expired"
+	case "deny", "failure":
 		return n.Status, ""
 	case "authorize":
 		return "authorize", ""
@@ -256,14 +267,15 @@ func (s snapClient) webhook(w http.ResponseWriter, r *http.Request, pool *pgxpoo
 		return
 	}
 	next, orderState := nextPayment(old, n)
-	if next != old {
+	if next != old || orderState != "" {
 		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", pid, next, n.TransactionID, orderState)
 		if err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO payment_events(payment_id,event_type,previous_status,new_status,source) VALUES($1,'status_changed',$2,$3,'webhook')", pid, old, next)
 		}
-		if err == nil && orderState == "paid" {
-			_, err = tx.Exec(ctx, "UPDATE orders SET status='paid',updated_at=NOW() WHERE id=$1 AND status='pending'", oid)
-			if err == nil {
+		if err == nil && orderState != "" {
+			var tag pgconn.CommandTag
+			tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND status='pending'", oid, orderState)
+			if err == nil && orderState == "paid" && tag.RowsAffected() > 0 {
 				_, err = tx.Exec(ctx, "INSERT INTO outbox_events(aggregate_type,aggregate_id,event_type,payload) VALUES('payment',$1,'payment.paid',jsonb_build_object('orderId',$2::text))", pid, oid)
 			}
 		}
@@ -273,4 +285,76 @@ func (s snapClient) webhook(w http.ResponseWriter, r *http.Request, pool *pgxpoo
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+func (s snapClient) refreshPayment(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
+	ctx := r.Context()
+	p := paymentResponse{OrderNumber: chi.URLParam(r, "orderNumber")}
+	var providerID string
+	err := pool.QueryRow(ctx, "SELECT p.id,p.provider_order_id FROM payments p JOIN orders o ON o.id=p.order_id WHERE o.order_number=$1 AND p.provider='midtrans' ORDER BY p.created_at DESC LIMIT 1", p.OrderNumber).Scan(&p.PaymentID, &providerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeAPIError(w, 404, "payment_not_found", "Payment was not found")
+		return
+	}
+	if err != nil {
+		writeAPIError(w, 500, "database_error", "Unable to read payment")
+		return
+	}
+	if s.key == "" {
+		writeAPIError(w, 503, "provider_disabled", "Midtrans Sandbox key is not configured")
+		return
+	}
+	var n midtransNotice
+	if err := s.request(ctx, "GET", "https://api.sandbox.midtrans.com/v2/"+url.PathEscape(providerID)+"/status", nil, &n); err != nil || n.OrderID != providerID || n.TransactionID == "" {
+		writeAPIError(w, 502, "provider_unverified", "Unable to confirm current payment status")
+		return
+	}
+	amount, err := rupiah(n.GrossAmount)
+	if err != nil {
+		writeAPIError(w, 502, "invalid_amount", "Invalid provider amount")
+		return
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		writeAPIError(w, 500, "database_error", "Unable to refresh payment")
+		return
+	}
+	defer tx.Rollback(ctx)
+	var oid, old string
+	var expected int64
+	err = tx.QueryRow(ctx, "SELECT order_id,status,amount FROM payments WHERE id=$1 FOR UPDATE", p.PaymentID).Scan(&oid, &old, &expected)
+	if err != nil {
+		writeAPIError(w, 500, "database_error", "Unable to read payment")
+		return
+	}
+	if amount != expected {
+		writeAPIError(w, 409, "amount_mismatch", "Amount does not match")
+		return
+	}
+	next, orderState := nextPayment(old, n)
+	if old == "cancel" && n.Status == "cancel" {
+		orderState = "cancelled"
+	}
+	if old == "expire" && n.Status == "expire" {
+		orderState = "expired"
+	}
+	if next != old {
+		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", p.PaymentID, next, n.TransactionID, orderState)
+		if err == nil {
+			_, err = tx.Exec(ctx, "INSERT INTO payment_events(payment_id,event_type,previous_status,new_status,source) VALUES($1,'status_changed',$2,$3,'reconciliation')", p.PaymentID, old, next)
+		}
+	}
+	if err == nil && orderState != "" {
+		var tag pgconn.CommandTag
+		tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND status='pending'", oid, orderState)
+		if err == nil && orderState == "paid" && tag.RowsAffected() > 0 {
+			_, err = tx.Exec(ctx, "INSERT INTO outbox_events(aggregate_type,aggregate_id,event_type,payload) VALUES('payment',$1,'payment.paid',jsonb_build_object('orderId',$2::text))", p.PaymentID, oid)
+		}
+	}
+	if err != nil || tx.Commit(ctx) != nil {
+		writeAPIError(w, 500, "database_error", "Unable to save payment status")
+		return
+	}
+	p.Status = next
+	writeJSON(w, 200, p)
 }
