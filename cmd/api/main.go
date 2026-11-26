@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/zzugab/simple-payment-gateway/internal/config"
 	"github.com/zzugab/simple-payment-gateway/internal/platform/database"
