@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -135,6 +134,10 @@ func createOrderHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		response, status, err := persistOrder(r.Context(), pool, key, requestHash, req)
+		if errors.Is(err, errIdempotencyConflict) {
+			writeAPIError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used with a different request")
+			return
+		}
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "internal_error", "Unable to create order")
 			return
@@ -298,5 +301,3 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, apiError{Error: apiErrorDetail{Code: code, Message: message}})
 }
 
-// Keep bytes imported for request-hash regression tests and exact JSON handling.
-var _ = bytes.MinRead
