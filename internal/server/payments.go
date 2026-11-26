@@ -177,6 +177,10 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 	r.Post("/orders/{orderNumber}/payments/refresh", func(w http.ResponseWriter, r *http.Request) {
 		s.refreshPayment(w, r, pool)
 	})
+	r.Post("/orders/{orderNumber}/refunds", func(w http.ResponseWriter, r *http.Request) {
+		s.refund(w, r, pool)
+	})
+	r.Get("/orders/{orderNumber}/refunds", listRefunds(pool))
 	r.Post("/webhooks/midtrans", func(w http.ResponseWriter, r *http.Request) {
 		s.webhook(w, r, pool)
 	})
@@ -206,6 +210,14 @@ func rupiah(v string) (int64, error) {
 }
 
 func nextPayment(old string, n midtransNotice) (string, string) {
+	if old == "settlement" || old == "capture" || old == "partial_refund" || old == "pending" || old == "authorize" {
+		switch n.Status {
+		case "refund":
+			return "refund", "refunded"
+		case "partial_refund":
+			return "partial_refund", "partially_refunded"
+		}
+	}
 	if n.Status == "settlement" || (n.Status == "capture" && n.Fraud == "accept") {
 		if old != "pending" && old != "authorize" && old != "capture" && old != "settlement" {
 			return old, ""
@@ -285,13 +297,13 @@ func (s snapClient) webhook(w http.ResponseWriter, r *http.Request, pool *pgxpoo
 	}
 	next, orderState := nextPayment(old, n)
 	if next != old || orderState != "" {
-		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", pid, next, n.TransactionID, orderState)
+		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4 IN ('paid','refunded','partially_refunded') THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", pid, next, n.TransactionID, orderState)
 		if err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO payment_events(payment_id,event_type,previous_status,new_status,source) VALUES($1,'status_changed',$2,$3,'webhook')", pid, old, next)
 		}
 		if err == nil && orderState != "" {
 			var tag pgconn.CommandTag
-			tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND status='pending'", oid, orderState)
+			tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND (status='pending' OR ($2 IN ('refunded','partially_refunded') AND status IN ('paid','partially_refunded')))", oid, orderState)
 			if err == nil && orderState == "paid" && tag.RowsAffected() > 0 {
 				_, err = tx.Exec(ctx, "INSERT INTO outbox_events(aggregate_type,aggregate_id,event_type,payload) VALUES('payment',$1,'payment.paid',jsonb_build_object('orderId',$2::text))", pid, oid)
 			}
@@ -356,14 +368,14 @@ func (s snapClient) refreshPayment(w http.ResponseWriter, r *http.Request, pool 
 		orderState = "expired"
 	}
 	if next != old {
-		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4='paid' THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", p.PaymentID, next, n.TransactionID, orderState)
+		_, err = tx.Exec(ctx, "UPDATE payments SET status=$2,provider_transaction_id=$3,paid_at=CASE WHEN $4 IN ('paid','refunded','partially_refunded') THEN COALESCE(paid_at,NOW()) ELSE paid_at END,updated_at=NOW() WHERE id=$1", p.PaymentID, next, n.TransactionID, orderState)
 		if err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO payment_events(payment_id,event_type,previous_status,new_status,source) VALUES($1,'status_changed',$2,$3,'reconciliation')", p.PaymentID, old, next)
 		}
 	}
 	if err == nil && orderState != "" {
 		var tag pgconn.CommandTag
-		tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND status='pending'", oid, orderState)
+		tag, err = tx.Exec(ctx, "UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 AND (status='pending' OR ($2 IN ('refunded','partially_refunded') AND status IN ('paid','partially_refunded')))", oid, orderState)
 		if err == nil && orderState == "paid" && tag.RowsAffected() > 0 {
 			_, err = tx.Exec(ctx, "INSERT INTO outbox_events(aggregate_type,aggregate_id,event_type,payload) VALUES('payment',$1,'payment.paid',jsonb_build_object('orderId',$2::text))", p.PaymentID, oid)
 		}
