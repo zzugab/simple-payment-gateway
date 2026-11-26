@@ -7,9 +7,9 @@ import (
 )
 
 type Config struct {
-	AppEnv           string
-	HTTPAddr         string
-	DatabaseURL      string
+	AppEnv            string
+	HTTPAddr          string
+	DatabaseURL       string
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
