@@ -1,13 +1,23 @@
-.PHONY: run test build fmt vet tidy
+.PHONY: up down logs build run test fmt vet tidy
 
+up:
+	docker compose up --build -d
+
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f api
+
+build:
+	docker compose build api
+
+# Optional host-based development; requires Go installed locally.
 run:
 	set -a && . ./.env && set +a && go run ./cmd/api
 
 test:
 	go test ./...
-
-build:
-	go build -o bin/api ./cmd/api
 
 fmt:
 	gofmt -w ./cmd ./internal
