@@ -8,8 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,7 +53,7 @@ func (s snapClient) request(ctx context.Context, method, endpoint string, body a
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("provider HTTP status %d", res.StatusCode)
+		return providerHTTPError{status: res.StatusCode}
 	}
 	return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(result)
 }
@@ -83,7 +83,8 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 		defer tx.Rollback(ctx)
 		var orderID, state string
 		var amount int64
-		err = tx.QueryRow(ctx, "SELECT id, status, amount FROM orders WHERE order_number=$1 FOR UPDATE", number).Scan(&orderID, &state, &amount)
+		var name, email, phone, description string
+		err = tx.QueryRow(ctx, "SELECT o.id,o.status,o.amount,COALESCE(o.customer_snapshot->>'name',c.full_name,'Customer'),COALESCE(o.customer_snapshot->>'email',c.email,''),COALESCE(o.customer_snapshot->>'phone',c.phone,''),COALESCE(o.description,'') FROM orders o LEFT JOIN customers c ON c.id=o.customer_id WHERE o.order_number=$1 FOR UPDATE OF o", number).Scan(&orderID, &state, &amount, &name, &email, &phone, &description)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeAPIError(w, 404, "order_not_found", "Order was not found")
 			return
@@ -110,6 +111,17 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 			writeAPIError(w, 500, "database_error", "Unable to read payment")
 			return
 		}
+		rows, err := tx.Query(ctx, "SELECT item_id,name,price,quantity FROM order_items WHERE order_id=$1 ORDER BY line_number", orderID)
+		if err != nil {
+			writeAPIError(w, 500, "database_error", "Unable to read order items")
+			return
+		}
+		items, err := pgx.CollectRows(rows, pgx.RowToStructByPos[orderItem])
+		if err != nil || validateItems(items, amount) != nil {
+			writeAPIError(w, 500, "invalid_order_items", "Unable to validate order items")
+			return
+		}
+		payload := snapPayload(number, amount, name, email, phone, description, items)
 		err = tx.QueryRow(ctx, "INSERT INTO payments(order_id,provider_order_id,amount) VALUES($1,$2,$3) RETURNING id,status", orderID, number, amount).Scan(&p.PaymentID, &p.Status)
 		if err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO payment_attempts(payment_id,attempt_number) VALUES($1,1)", p.PaymentID)
@@ -119,12 +131,17 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 			return
 		}
 		var result snapResult
-		err = s.request(ctx, "POST", "https://app.sandbox.midtrans.com/snap/v1/transactions", map[string]any{"transaction_details": map[string]any{"order_id": number, "gross_amount": amount}}, &result)
+		err = s.request(ctx, "POST", "https://app.sandbox.midtrans.com/snap/v1/transactions", payload, &result)
 		saveCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 		if err != nil || result.Token == "" || result.RedirectURL == "" {
-			_, _ = pool.Exec(saveCtx, "UPDATE payment_attempts SET status='uncertain',error_message='Provider result not confirmed' WHERE payment_id=$1", p.PaymentID)
-			writeAPIError(w, 502, "provider_uncertain", "Payment reserved; provider result needs reconciliation")
+			reason := "Provider response missing token or redirect URL"
+			if err != nil {
+				reason = providerDiagnostic(err)
+			}
+			slog.Warn("Snap creation unconfirmed", "order_number", number, "reason", reason)
+			_, _ = pool.Exec(saveCtx, "UPDATE payment_attempts SET status='uncertain',error_message=$2 WHERE payment_id=$1", p.PaymentID, reason)
+			writeAPIError(w, 502, "provider_uncertain", "Payment reserved; "+reason)
 			return
 		}
 		saveTx, err := pool.Begin(saveCtx)
@@ -357,4 +374,23 @@ func (s snapClient) refreshPayment(w http.ResponseWriter, r *http.Request, pool 
 	}
 	p.Status = next
 	writeJSON(w, 200, p)
+}
+
+type providerHTTPError struct {
+	status int
+}
+
+func (e providerHTTPError) Error() string {
+	return "Midtrans HTTP " + strconv.Itoa(e.status)
+}
+
+func providerDiagnostic(err error) string {
+	var status providerHTTPError
+	if errors.As(err, &status) {
+		return status.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "Midtrans request timed out"
+	}
+	return "Midtrans connection or response error"
 }

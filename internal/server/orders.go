@@ -30,9 +30,10 @@ type createOrderRequest struct {
 		Email string `json:"email"`
 		Phone string `json:"phone"`
 	} `json:"customer"`
-	Amount      int64  `json:"amount"`
-	Currency    string `json:"currency"`
-	Description string `json:"description"`
+	Amount      int64       `json:"amount"`
+	Currency    string      `json:"currency"`
+	Description string      `json:"description"`
+	Items       []orderItem `json:"items,omitempty"`
 }
 
 type orderResponse struct {
@@ -73,8 +74,8 @@ func (req *createOrderRequest) validate() error {
 	if len(req.Customer.Phone) > 32 {
 		return errors.New("customer.phone must be at most 32 characters")
 	}
-	if req.Amount <= 0 {
-		return errors.New("amount must be greater than zero")
+	if err := validateItems(req.Items, req.Amount); err != nil {
+		return err
 	}
 	if req.Currency == "" {
 		req.Currency = "IDR"
@@ -218,18 +219,29 @@ func persistOrder(ctx context.Context, pool *pgxpool.Pool, key, requestHash stri
 	if err != nil {
 		return orderResponse{}, 0, err
 	}
+	snapshot, err := json.Marshal(req.Customer)
+	if err != nil {
+		return orderResponse{}, 0, err
+	}
 	var orderID string
 	var response orderResponse
 	err = tx.QueryRow(ctx, `
-		INSERT INTO orders (order_number, customer_id, amount, currency, status, description)
-		VALUES ($1, $2, $3, $4, 'pending', NULLIF($5, ''))
+		INSERT INTO orders (order_number, customer_id, amount, currency, status, description, customer_snapshot)
+		VALUES ($1, $2, $3, $4, 'pending', NULLIF($5, ''), $6)
 		RETURNING id, order_number, amount, currency, status, COALESCE(description, ''), created_at
-	`, orderNumber, customerID, req.Amount, req.Currency, req.Description).Scan(
+	`, orderNumber, customerID, req.Amount, req.Currency, req.Description, snapshot).Scan(
 		&orderID, &response.OrderNumber, &response.Amount, &response.Currency,
 		&response.Status, &response.Description, &response.CreatedAt,
 	)
 	if err != nil {
 		return orderResponse{}, 0, err
+	}
+
+	for i, item := range req.Items {
+		_, err = tx.Exec(ctx, "INSERT INTO order_items(order_id,line_number,item_id,name,price,quantity) VALUES($1,$2,$3,$4,$5,$6)", orderID, i+1, item.ID, item.Name, item.Price, item.Quantity)
+		if err != nil {
+			return orderResponse{}, 0, err
+		}
 	}
 
 	responseBody, err := json.Marshal(response)
