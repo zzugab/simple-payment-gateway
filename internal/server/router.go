@@ -31,9 +31,12 @@ func NewRouter(pool *pgxpool.Pool) http.Handler {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ready"})
 	})
 
+	r.Get("/checkout", checkoutHandler)
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/orders", createOrderHandler(pool))
 		r.Get("/orders/{orderNumber}", getOrderHandler(pool))
+		registerPaymentRoutes(r, pool)
 	})
 
 	return r

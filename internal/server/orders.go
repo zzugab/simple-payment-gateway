@@ -299,4 +299,3 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 func writeAPIError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, apiError{Error: apiErrorDetail{Code: code, Message: message}})
 }
-
