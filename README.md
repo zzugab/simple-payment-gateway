@@ -20,10 +20,12 @@ A Go-based payment engineering lab for learning and building a reliable Midtrans
 - Testing: Go tests and k6.
 - Observability: structured logs, Prometheus, and OpenTelemetry in later milestones.
 
-## Current milestone: Database foundation
+## Current milestone: Order API foundation
 - Go HTTP server with graceful shutdown and health endpoints.
 - PostgreSQL connection pool.
 - Versioned schema for customers, orders, payments, payment attempts, payment events, webhook inbox, idempotency keys, and transactional outbox.
+- Order creation and retrieval endpoints with request validation and PostgreSQL transaction handling.
+- Idempotent order creation using the `Idempotency-Key` request header.
 - Docker Compose waits for PostgreSQL health, runs migrations, then starts the API.
 - Multi-stage Docker build; Go toolchain is not required on the host machine.
 - Environment-based configuration.
@@ -104,6 +106,25 @@ set -a && source .env && set +a
 go run ./cmd/api
 ```
 For this optional workflow, set `DATABASE_URL` in your shell to use `localhost:5433` (or your configured `POSTGRES_PORT`). The Compose API service uses its own internal database URL automatically.
+
+## Order API quick test
+
+Create an order (replace the idempotency key with a new unique value for a new order):
+
+```sh
+curl -i -X POST http://localhost:8080/api/v1/orders \\
+  -H 'Content-Type: application/json' \\
+  -H 'Idempotency-Key: checkout-test-0001' \\
+  -d '{"customer":{"name":"Andika","email":"andika@example.com","phone":"08123456789"},"amount":125000,"currency":"IDR","description":"Sandbox test order"}'
+```
+
+Copy the returned `orderNumber` and retrieve it:
+
+```sh
+curl -i http://localhost:8080/api/v1/orders/ORD-REPLACE-WITH-ORDER-NUMBER
+```
+
+See [docs/order-api.md](docs/order-api.md) for request/response details and idempotency behavior.
 
 ## Project layout
 - cmd/api: application entry point
