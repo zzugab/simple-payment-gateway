@@ -22,7 +22,6 @@ import (
 
 const (
 	maxOrderBodyBytes = 16 << 10
-	idempotencyTTL    = 24 * time.Hour
 )
 
 type createOrderRequest struct {
@@ -157,7 +156,7 @@ func persistOrder(ctx context.Context, pool *pgxpool.Pool, key, requestHash stri
 	var idempotencyID int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO idempotency_keys (scope, idempotency_key, request_hash, expires_at)
-		VALUES ('create_order', $1, $2, NOW() + $3::interval)
+		VALUES ('create_order', $1, $2, NOW() + INTERVAL '24 hours')
 		ON CONFLICT (scope, idempotency_key) DO UPDATE
 		SET request_hash = EXCLUDED.request_hash,
 		    response_status = NULL,
@@ -167,7 +166,7 @@ func persistOrder(ctx context.Context, pool *pgxpool.Pool, key, requestHash stri
 		    expires_at = EXCLUDED.expires_at
 		WHERE idempotency_keys.expires_at <= NOW()
 		RETURNING id
-	`, key, requestHash, idempotencyTTL.String()).Scan(&idempotencyID)
+	`, key, requestHash).Scan(&idempotencyID)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		var existingHash string
