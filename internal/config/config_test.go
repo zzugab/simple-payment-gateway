@@ -1,9 +1,6 @@
 package config
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
@@ -31,5 +28,3 @@ func TestLoadReadsEnvironment(t *testing.T) {
 		t.Fatal("expected DATABASE_URL to be populated")
 	}
 }
-
-var _ = os.Getenv
