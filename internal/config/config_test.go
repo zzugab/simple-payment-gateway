@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
@@ -13,6 +16,7 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db?sslmode=disable")
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("HTTP_ADDR", ":9090")
+	t.Setenv("HTTP_READ_TIMEOUT", "12s")
 
 	cfg, err := Load()
 	if err != nil {
@@ -26,5 +30,20 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 	if cfg.DatabaseURL == "" {
 		t.Fatal("expected DATABASE_URL to be populated")
+	}
+	if cfg.ReadTimeout != 12*time.Second {
+		t.Fatalf("expected HTTP_READ_TIMEOUT 12s, got %s", cfg.ReadTimeout)
+	}
+	if cfg.ShutdownTimeout != 10*time.Second {
+		t.Fatalf("expected default SHUTDOWN_TIMEOUT 10s, got %s", cfg.ShutdownTimeout)
+	}
+}
+
+func TestLoadRejectsInvalidDuration(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db?sslmode=disable")
+	t.Setenv("HTTP_READ_TIMEOUT", "not-a-duration")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid HTTP_READ_TIMEOUT")
 	}
 }
