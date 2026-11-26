@@ -1,4 +1,4 @@
--- +migrate Up
+-- Initial payment gateway schema.
 CREATE TABLE customers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     full_name TEXT NOT NULL,
