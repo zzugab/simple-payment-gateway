@@ -13,4 +13,41 @@ View: docker compose logs -f api
 Filter JSON (requires jq): docker compose logs --no-log-prefix api | jq -R 'fromjson? | select(.level == "ERROR")'
 Find a request: docker compose logs --no-log-prefix api | jq -R 'fromjson? | select(.request_id == "REPLACE_WITH_ID")'
 
-This is operational logging, not a financial audit ledger. Payment records and payment events remain in PostgreSQL. Centralized collection, alerting, database query-level logs and pool metrics are not included. Health checks are logged too.
+This is operational logging, not a financial audit ledger. Payment records and payment events remain in PostgreSQL. Alerting, database query-level logs and pool metrics are not included. Health checks are logged too.
+
+## Grafana, Loki and Alloy (local development)
+
+Set GRAFANA_ADMIN_PASSWORD in .env to a unique password before the first start.
+Start the optional profile:
+
+```sh
+docker compose --profile observability up -d --build
+docker compose --profile observability ps
+curl -i http://localhost:8080/health/live
+```
+
+Open http://localhost:3001 (or GRAFANA_PORT), log in with the configured admin credentials,
+then open Dashboards > Payment Gateway > Payment Gateway | Logs & HTTP.
+The Loki datasource is pre-provisioned. Allow a few seconds for discovery and ingestion.
+Use the Request ID textbox to filter the application log panel. In Explore, select Loki:
+
+```logql
+{service="payment-gateway"} | json | msg="http_request"
+{service="payment-gateway"} | json | level="ERROR"
+{service="payment-gateway"} | json | request_id="REPLACE_WITH_ID"
+```
+
+HTTP counts include health checks and depend on LOG_LEVEL=INFO (or DEBUG).
+The dashboard measures logs, not authoritative financial transactions or database metrics.
+P95 is the 95th percentile of recorded durations; no latency data means no samples.
+Loki retention is seven days, not a hard disk quota. Grafana, Loki and Alloy positions have named volumes.
+Do not use docker compose down -v unless intentionally deleting data, including PostgreSQL.
+
+Grafana binds only to localhost, Loki and Alloy have no published ports. For a remote server,
+use SSH port forwarding, e.g. ssh -L 3001:127.0.0.1:3001 user@server.
+This is a local lab setup: Alloy requires Docker socket access, which is privileged even
+when the socket bind mount is read-only. Do not expose the socket or use this configuration
+unchanged in production. Loki has no authentication and shares the local Compose network.
+Grafana admin password environment settings initialize a new database only.
+
+Troubleshooting: docker compose --profile observability logs --tail=100 alloy loki grafana
