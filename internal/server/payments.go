@@ -33,7 +33,26 @@ type snapResult struct {
 	RedirectURL string `json:"redirect_url"`
 }
 
-func (s snapClient) request(ctx context.Context, method, endpoint string, body any, result any) error {
+func (s snapClient) request(ctx context.Context, method, endpoint string, body any, result any) (requestErr error) {
+	start := time.Now()
+	status := 0
+	operation := "snap_create"
+	if strings.HasSuffix(endpoint, "/status") {
+		operation = "status"
+	} else if strings.HasSuffix(endpoint, "/refund") {
+		operation = "refund"
+	}
+	defer func() {
+		level := slog.LevelInfo
+		outcome := "success"
+		if requestErr != nil {
+			level = slog.LevelWarn
+			outcome = "error"
+		}
+		requestLogger(ctx).Log(ctx, level, "provider_request", "provider", "midtrans",
+			"operation", operation, "status", status, "outcome", outcome,
+			"duration_ms", float64(time.Since(start).Microseconds())/1000)
+	}()
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -52,6 +71,7 @@ func (s snapClient) request(ctx context.Context, method, endpoint string, body a
 		return err
 	}
 	defer res.Body.Close()
+	status = res.StatusCode
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return providerHTTPError{status: res.StatusCode}
 	}
@@ -139,7 +159,7 @@ func registerPaymentRoutes(r chi.Router, pool *pgxpool.Pool) {
 			if err != nil {
 				reason = providerDiagnostic(err)
 			}
-			slog.Warn("Snap creation unconfirmed", "order_number", number, "reason", reason)
+			requestLogger(ctx).Warn("snap_creation_unconfirmed", "payment_id", p.PaymentID)
 			_, _ = pool.Exec(saveCtx, "UPDATE payment_attempts SET status='uncertain',error_message=$2 WHERE payment_id=$1", p.PaymentID, reason)
 			writeAPIError(w, 502, "provider_uncertain", "Payment reserved; "+reason)
 			return
