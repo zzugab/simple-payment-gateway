@@ -16,6 +16,7 @@ type healthResponse struct {
 
 func NewRouter(pool *pgxpool.Pool) http.Handler {
 	r := chi.NewRouter()
+	r.Use(requestLogging)
 
 	r.Get("/health/live", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})

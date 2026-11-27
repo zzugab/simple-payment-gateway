@@ -15,21 +15,28 @@ import (
 )
 
 func main() {
+	var level slog.Level
+	if value := os.Getenv("LOG_LEVEL"); value != "" {
+		if err := level.UnmarshalText([]byte(value)); err != nil {
+			slog.Error("invalid LOG_LEVEL; use DEBUG, INFO, WARN or ERROR")
+			os.Exit(1)
+		}
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).With("service", "payment-gateway")
+	slog.SetDefault(logger)
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load configuration", "error", err)
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	pool, err := database.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("connect to PostgreSQL", "error", err)
+		logger.Error("connect to PostgreSQL", "error_type", "database_connection_failed")
 		os.Exit(1)
 	}
 	defer pool.Close()

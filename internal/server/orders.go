@@ -309,5 +309,8 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func writeAPIError(w http.ResponseWriter, status int, code, message string) {
+	if recorder, ok := w.(interface{ setErrorCode(string) }); ok {
+		recorder.setErrorCode(code)
+	}
 	writeJSON(w, status, apiError{Error: apiErrorDetail{Code: code, Message: message}})
 }
